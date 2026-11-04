@@ -1,0 +1,46 @@
+# Every morning: grade last night's picks, bring in last night's games, rebuild ratings and models.
+name: daily prep
+on:
+  schedule:
+    - cron: "15 11 * * *"        # 6:15 AM Eastern (11:15 UTC)
+  workflow_dispatch: {}
+concurrency: { group: nhl-data, cancel-in-progress: false }
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: restore downloaded NHL data
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/raw_nhl
+            data/tables/hist
+          key: nhl-data-${{ github.run_id }}
+          restore-keys: nhl-data-
+      - name: grade last night
+        run: python grade.py
+      - name: prep (new games, ratings, models)
+        run: python prep.py
+      - name: save NHL data
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/raw_nhl
+            data/tables/hist
+          key: nhl-data-${{ github.run_id }}
+      - name: save today's ratings and models
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/tables/rater_state.pkl
+            model_files/live_models.pkl
+          key: nhl-state-${{ github.run_id }}

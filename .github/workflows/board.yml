@@ -1,0 +1,29 @@
+# Through the day: re-pull lineups, goalies and prices, update tonight's picks.
+name: board
+on:
+  schedule:
+    - cron: "*/30 15-23 * * *"    # 10:00 AM - 6:30 PM Eastern
+    - cron: "*/20 0-3 * * *"      # 7:00 PM - 10:40 PM Eastern, every 20 min around puck drops
+  workflow_dispatch: {}
+concurrency: { group: nhl-board, cancel-in-progress: true }
+jobs:
+  board:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -r requirements.txt
+      - name: load this morning's ratings and models
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/tables/rater_state.pkl
+            model_files/live_models.pkl
+          key: nhl-state-${{ github.run_id }}
+          restore-keys: nhl-state-
+      - run: python board.py
