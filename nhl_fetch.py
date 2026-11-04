@@ -60,11 +60,21 @@ def fetch_game(season, gid):
         jsonio.save(p, data)
     for kind in ("box", "shifts"):
         q = path_for(season, gid, kind)
-        if not jsonio.exists(q):
+        have = jsonio.exists(q)
+        # the NHL often posts shift charts a day or more after the game; an empty one saved
+        # earlier is not final, so this season's empty files get asked for again each morning
+        if have and kind == "shifts" and season == config.LIVE_SEASON and _no_shifts(jsonio.load(q)):
+            have = False
+        if not have:
             d = _get(ENDPOINTS[kind].format(gid=gid))
-            if d is not None:
-                jsonio.save(q, d)
+            if d is None or (kind == "shifts" and _no_shifts(d)):
+                continue          # nothing posted yet: save nothing, try again tomorrow
+            jsonio.save(q, d)
     return True
+
+
+def _no_shifts(d):
+    return not d or not d.get("data")
 
 
 def fetch_season(season, workers=6, max_games=1500):
