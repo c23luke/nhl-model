@@ -66,6 +66,9 @@ def main():
     date_et = a.date or (now - timedelta(hours=5)).strftime("%Y-%m-%d")
 
     # ---------------- what we know as of this morning
+    if not (TABLES / "rater_state.pkl").exists() or not (config.MODEL_FILES / "live_models.pkl").exists():
+        print("morning prep hasn't finished yet - nothing to do this run")
+        return
     R = Rater.load(TABLES / "rater_state.pkl")
     with open(config.MODEL_FILES / "live_models.pkl", "rb") as f:
         models = pickle.load(f)
