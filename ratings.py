@@ -271,11 +271,15 @@ class Rater:
     def update_game(self, g, date, sg, gg, team_xg):
         if sg is None:
             return
-        vals = sg[SK].to_numpy(float)
-        for pid, v, t5, tpp, tpk, tt in zip(sg.player_id.values, vals, sg.toi5.values, sg.toipp.values,
-                                            sg.toipk.values, sg.box_toi.values):
-            self.acc[pid] = self.acc.get(pid, np.zeros(len(SK))) * self.dS + np.nan_to_num(v)
-            self.rec[pid] = self.rec.get(pid, np.zeros(5)) * self.dR + np.array([t5, tpp, tpk, tt, 1.0])
+        # A game with no shift chart reads as 0 minutes at 5v5 / PP / PK for every skater. Counting it
+        # would drag everyone's expected ice time (and so expected shots) down, so skater history
+        # only learns from games where we know who was on the ice. Goalies and team luck still update.
+        if getattr(g, "has_shifts", 1):
+            vals = sg[SK].to_numpy(float)
+            for pid, v, t5, tpp, tpk, tt in zip(sg.player_id.values, vals, sg.toi5.values, sg.toipp.values,
+                                                sg.toipk.values, sg.box_toi.values):
+                self.acc[pid] = self.acc.get(pid, np.zeros(len(SK))) * self.dS + np.nan_to_num(v)
+                self.rec[pid] = self.rec.get(pid, np.zeros(5)) * self.dR + np.array([t5, tpp, tpk, tt, 1.0])
         if gg is not None:
             for r in gg.itertuples():
                 self.gacc[r.player_id] = self.gacc.get(r.player_id, np.zeros(3)) * self.dG + np.array([r.xga, r.ga, r.sa])
