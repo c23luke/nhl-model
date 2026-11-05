@@ -6,6 +6,8 @@ A pick is READY only when all four checks pass:
   lineups  both teams' lines updated within 14 hours of puck drop and fully matched to NHL ids
   prices   at least 2 of the books priced the side
   time     puck drop is at least 10 minutes away
+  gtd      for each game-time decision in either lineup, the bet still qualifies with him sitting
+           (his spot taken by the team's most-used extra skater); props on that player wait outright
 Otherwise it is WAITING and says what it is waiting on.
 
 Usage: ODDS_API_KEY=... SUPABASE_SERVICE_KEY=... python board.py [--date YYYY-MM-DD] [--dry]
@@ -135,7 +137,22 @@ def main():
         for p in pr:
             p["name"] = ids_to_name.get(p["player_id"], str(p["player_id"]))
         ev = find_event(events, hname, aname, start)
-        info[g["id"]] = {"start": start, "lu": lu, "gl": gl, "ev": ev, "names": ids_to_name}
+        # game-time decisions: re-rate the game with each one sitting, his spot taken by the team's
+        # extra skater at the same position who plays the most (or an average player if there is none)
+        alts = []
+        for ab, tid in ((ha, H["id"]), (aa, A["id"])):
+            for k, (nm, pid, pos) in enumerate(lu[ab].get("flagged_ids", [])):
+                used = {p for p, _ in lu[ab]["skaters"]}
+                subs = [(R.skater(p, q)["e5"], p) for p, q in lu[ab].get("extras", []) if q == pos and p not in used]
+                sub = max(subs)[1] if subs else -(1000 + k)
+                sk = [(sub if p == pid else p, q) for p, q in lu[ab]["skaters"]]
+                ups = {H["id"]: (lu[ha]["skaters"], gl[ha]["id"]), A["id"]: (lu[aa]["skaters"], gl[aa]["id"])}
+                ups[tid] = (sk, gl[ab]["id"])
+                arow, apr = R.game_features(gg, date_et, ups)
+                if arow is not None:
+                    sub_name = ids_to_name.get(sub, "an average depth player")
+                    alts.append({"team": ab, "name": nm, "sub": sub_name, "row": arow, "props": apr})
+        info[g["id"]] = {"start": start, "lu": lu, "gl": gl, "ev": ev, "names": ids_to_name, "alts": alts}
         rows.append(row)
         props.extend(pr)
 
@@ -150,6 +167,82 @@ def main():
     d = tg.merge(gp, on="game_id")
     d["mkt_p_home"] = d.game_id.map(lambda x: shop[x][0]["fair_home"] if x in shop else np.nan)
     d = S.add_flags(d)
+
+    names = {}
+    for i in info.values():
+        names.update(i.get("names", {}))
+    def game_picks(r, emit):
+        """Run every game-level rule on one rated game; emit(...) is called for each pick."""
+        ml, tot = shop[r.game_id]
+        prior = fh
+        net = S.stack_votes(pd.DataFrame([r]), prior).iloc[0]
+        for sid, q, k in (("ml_stack3", 0.20, 3), ("ml_stack2", 0.20, 2), ("ml_stack3_25", 0.25, 3)):
+            if q != 0.20:
+                old = S.TAIL
+                S.TAIL = q
+                n2 = S.stack_votes(pd.DataFrame([r]), prior).iloc[0]
+                ev = S.evidence(r, prior, n2 > 0, names) if abs(n2) >= k else None
+                S.TAIL = old
+                nn = n2
+            else:
+                nn = net
+                ev = S.evidence(r, prior, nn > 0, names) if abs(nn) >= k else None
+            if abs(nn) >= k:
+                home = nn > 0
+                tier = "★ 4+ flags" if abs(nn) >= 4 else f"{abs(int(nn))} flags"
+                emit(r, sid, r.home_abbrev if home else r.away_abbrev, "moneyline", ml["home" if home else "away"],
+                     ev, {"tier": tier, "model_prob": round(float(r.p_home if home else 1 - r.p_home), 4),
+                          "market_prob": round(float(r.mkt_p_home if home else 1 - r.mkt_p_home), 4)})
+        # single flags (10% tails), tracking only
+        for sid, f in (("ml_flag_lineup", "f_lineup"), ("ml_flag_hotgoalie", "f_hot_goalie")):
+            hi, lo = prior[f].quantile(0.9), prior[f].quantile(0.1)
+            if r[f] >= hi or r[f] <= lo:
+                home = r[f] >= hi
+                emit(r, sid, r.home_abbrev if home else r.away_abbrev, "moneyline", ml["home" if home else "away"],
+                     S.evidence(r, prior, home, names) or [{"flag": f, "text": f"{f} in its 10% tail"}])
+        if r.f_rest != 0:
+            home = r.f_rest > 0
+            emit(r, "ml_flag_rest", r.home_abbrev if home else r.away_abbrev, "moneyline", ml["home" if home else "away"],
+                 [{"flag": "Rest", "text": f"{r.away_abbrev if home else r.home_abbrev} on the second night of a back-to-back"}])
+        # model + market moneyline, best price after fee, 5%+
+        b = blend["moneyline"]
+        ph = float(S.blend(b, np.array([r.mkt_p_home]), np.array([r.p_home]))[0])
+        for home, rows_, p in ((True, ml["home"], ph), (False, ml["away"], 1 - ph)):
+            if rows_ and p * rows_[0]["after_fee"] - 1 > 0.05:
+                pm = r.p_home if home else 1 - r.p_home
+                pk = r.mkt_p_home if home else 1 - r.mkt_p_home
+                evv = p * rows_[0]["after_fee"] - 1
+                emit(r, "ml_blend5", r.home_abbrev if home else r.away_abbrev, "moneyline", rows_,
+                     [{"flag": "Model + market", "text": f"Model {pm:.1%}, market {pk:.1%}; mixed = {p:.1%} vs best "
+                                                        f"price {rows_[0]['after_fee_american']:+d} after fee, {evv:+.1%} expected"}],
+                     {"model_prob": round(float(pm), 4), "market_prob": round(float(pk), 4),
+                      "bet_prob": round(p, 4), "ev": round(evv, 4)})
+        # totals model (tracking), median price, 3%+
+        if tot and not np.isnan(r.p_over):
+            for over, rows_ in ((True, tot["over"]), (False, tot["under"])):
+                if not rows_:
+                    continue
+                pw = r.p_over if over else 1 - r.p_over - r.p_push
+                med = float(np.median([x["decimal"] for x in rows_]))
+                if pw * med + r.p_push - 1 > 0.03:
+                    emit(r, "totals_model", f"{'Over' if over else 'Under'} {tot['line']}", "total", rows_,
+                         [{"flag": "Goal model", "text": f"Model expects {r.lam_home + r.lam_away:.2f} regulation goals; "
+                                                         f"{'over' if over else 'under'} {tot['line']} {pw:.1%}"}],
+                         {"line": tot["line"], "model_prob": round(float(pw), 4)})
+
+
+    # the same rules, run on each "game-time decision sits" version of a game: which picks still qualify
+    holds = {}                                    # (game_id, team, name) -> {(strategy, pick), ...}
+    for gid, i in info.items():
+        for alt in i.get("alts", []):
+            ga, pa = model.predict_live(models, pd.DataFrame([alt["row"]]), pd.DataFrame(alt["props"]), lines)
+            da = pd.DataFrame([alt["row"]]).merge(ga, on="game_id")
+            da["mkt_p_home"] = shop[gid][0]["fair_home"] if gid in shop else np.nan
+            da = S.add_flags(da)
+            got = set()
+            if gid in shop:
+                game_picks(da.iloc[0], lambda r, sid, pick, *a, **k: got.add((sid, pick)))
+            holds[(gid, alt["team"], alt["name"])] = got
 
     picks = []
 
@@ -191,6 +284,19 @@ def main():
             elif not lu[ab]["complete"]:
                 f_, d_ = lu[ab]["n_listed"]
                 waiting.append(f"{ab} lineup incomplete ({f_} forwards, {d_} defense listed)")
+        # game-time decisions in either lineup
+        checks["gtd"] = True
+        for alt in i.get("alts", []):
+            who = f"{alt['name']} ({alt['team']}, game-time decision)"
+            if market == "shots on goal":
+                if (extra or {}).get("player") and norm_name(extra["player"]) == norm_name(alt["name"]):
+                    checks["gtd"] = False
+                    waiting.append(f"waiting on {who}: no prop bet until he's confirmed in")
+            elif (strategy, pick) in holds.get((r.game_id, alt["team"], alt["name"]), set()):
+                notes.append(f"holds with or without {alt['name']} ({alt['sub']} in for him)")
+            else:
+                checks["gtd"] = False
+                waiting.append(f"waiting on {who}: this bet only qualifies if he plays")
         if not checks["prices"]:
             waiting.append("fewer than 2 books priced")
         if not checks["time"]:
@@ -203,8 +309,9 @@ def main():
         best = side_rows[0] if side_rows else None
         p = {"strategy_id": strategy, "source": "live", "game_id": int(r.game_id), "game_date": date_et,
              "start_utc": start.isoformat(), "season": config.LIVE_SEASON, "home": ha, "away": aa,
-             "market": market, "pick": pick, "stake_units": stake, "evidence": evidence, "checks": checks,
-             "status": "ready" if all(checks[k] for k in ("goalies", "lineups", "prices", "time")) else "waiting",
+             "market": market, "pick": pick, "stake_units": stake,
+             "evidence": list(evidence) + [{"flag": "Lineup check", "text": n} for n in notes], "checks": checks,
+             "status": "ready" if all(checks[k] for k in ("goalies", "lineups", "prices", "time", "gtd")) else "waiting",
              "prices": side_rows[:8], "priced_at": now.isoformat(), "fill_plan": plan,
              "best_book": best["name"] if best else None, "best_american": best["american"] if best else None,
              "best_decimal": best["after_fee"] if best else None,
@@ -212,68 +319,9 @@ def main():
         p.update(extra or {})
         picks.append(p)
 
-    names = {}
-    for i in info.values():
-        names.update(i.get("names", {}))
     for _, r in d.iterrows():
-        if r.game_id not in shop:
-            continue
-        ml, tot = shop[r.game_id]
-        prior = fh
-        net = S.stack_votes(pd.DataFrame([r]), prior).iloc[0]
-        for sid, q, k in (("ml_stack3", 0.20, 3), ("ml_stack2", 0.20, 2), ("ml_stack3_25", 0.25, 3)):
-            if q != 0.20:
-                old = S.TAIL
-                S.TAIL = q
-                n2 = S.stack_votes(pd.DataFrame([r]), prior).iloc[0]
-                ev = S.evidence(r, prior, n2 > 0, names) if abs(n2) >= k else None
-                S.TAIL = old
-                nn = n2
-            else:
-                nn = net
-                ev = S.evidence(r, prior, nn > 0, names) if abs(nn) >= k else None
-            if abs(nn) >= k:
-                home = nn > 0
-                tier = "★ 4+ flags" if abs(nn) >= 4 else f"{abs(int(nn))} flags"
-                base(r, sid, r.home_abbrev if home else r.away_abbrev, "moneyline", ml["home" if home else "away"],
-                     ev, {"tier": tier, "model_prob": round(float(r.p_home if home else 1 - r.p_home), 4),
-                          "market_prob": round(float(r.mkt_p_home if home else 1 - r.mkt_p_home), 4)})
-        # single flags (10% tails), tracking only
-        for sid, f in (("ml_flag_lineup", "f_lineup"), ("ml_flag_hotgoalie", "f_hot_goalie")):
-            hi, lo = prior[f].quantile(0.9), prior[f].quantile(0.1)
-            if r[f] >= hi or r[f] <= lo:
-                home = r[f] >= hi
-                base(r, sid, r.home_abbrev if home else r.away_abbrev, "moneyline", ml["home" if home else "away"],
-                     S.evidence(r, prior, home, names) or [{"flag": f, "text": f"{f} in its 10% tail"}])
-        if r.f_rest != 0:
-            home = r.f_rest > 0
-            base(r, "ml_flag_rest", r.home_abbrev if home else r.away_abbrev, "moneyline", ml["home" if home else "away"],
-                 [{"flag": "Rest", "text": f"{r.away_abbrev if home else r.home_abbrev} on the second night of a back-to-back"}])
-        # model + market moneyline, best price after fee, 5%+
-        b = blend["moneyline"]
-        ph = float(S.blend(b, np.array([r.mkt_p_home]), np.array([r.p_home]))[0])
-        for home, rows_, p in ((True, ml["home"], ph), (False, ml["away"], 1 - ph)):
-            if rows_ and p * rows_[0]["after_fee"] - 1 > 0.05:
-                pm = r.p_home if home else 1 - r.p_home
-                pk = r.mkt_p_home if home else 1 - r.mkt_p_home
-                evv = p * rows_[0]["after_fee"] - 1
-                base(r, "ml_blend5", r.home_abbrev if home else r.away_abbrev, "moneyline", rows_,
-                     [{"flag": "Model + market", "text": f"Model {pm:.1%}, market {pk:.1%}; mixed = {p:.1%} vs best "
-                                                        f"price {rows_[0]['after_fee_american']:+d} after fee, {evv:+.1%} expected"}],
-                     {"model_prob": round(float(pm), 4), "market_prob": round(float(pk), 4),
-                      "bet_prob": round(p, 4), "ev": round(evv, 4)})
-        # totals model (tracking), median price, 3%+
-        if tot and not np.isnan(r.p_over):
-            for over, rows_ in ((True, tot["over"]), (False, tot["under"])):
-                if not rows_:
-                    continue
-                pw = r.p_over if over else 1 - r.p_over - r.p_push
-                med = float(np.median([x["decimal"] for x in rows_]))
-                if pw * med + r.p_push - 1 > 0.03:
-                    base(r, "totals_model", f"{'Over' if over else 'Under'} {tot['line']}", "total", rows_,
-                         [{"flag": "Goal model", "text": f"Model expects {r.lam_home + r.lam_away:.2f} regulation goals; "
-                                                         f"{'over' if over else 'under'} {tot['line']} {pw:.1%}"}],
-                         {"line": tot["line"], "model_prob": round(float(pw), 4)})
+        if r.game_id in shop:
+            game_picks(r, base)
 
     # ---------------- shots on goal props
     if len(pp):

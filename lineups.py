@@ -178,13 +178,17 @@ def team_lineup(abbrev, puck_drop_utc, spots=None):
             return by_num[int(num)]
         return match(name, ids)
 
-    skaters, missing = [], []
+    skaters, missing, named = [], [], {}
     for name in lines["forwards"]:
         m = find(name)
         (skaters.append((m[0], "F")) if m else missing.append(name))
+        if m:
+            named[name] = (m[0], "F")
     for name in lines["defense"]:
         m = find(name)
         (skaters.append((m[0], "D")) if m else missing.append(name))
+        if m:
+            named[name] = (m[0], "D")
     g1 = find(lines["goalies"][0]) if lines["goalies"] else None
     hours_old = None
     if lines["updated_at"]:
@@ -194,12 +198,19 @@ def team_lineup(abbrev, puck_drop_utc, spots=None):
                if (meta.get(n) or {}).get("gtd") or (meta.get(n) or {}).get("injury")]
     tonight = {v[0] for v in by_num.values()} | {v[0] for v in by_name.values()}
     on_roster = bool(spots) and all(pid in tonight for pid, _ in skaters)
+    in18 = {pid for pid, _ in skaters}
+    goalie_ids = {v[0] for v in list(by_num.values()) + list(by_name.values()) if v[1] == "G"}
+    # tonight's extra skaters: on the NHL game roster but not in DailyFaceoff's 18 (healthy scratches,
+    # call-ups) -- the players who would come in if someone in the 18 sits
+    extras = sorted({v for v in list(by_num.values()) + list(by_name.values())
+                     if v[0] not in in18 and v[0] not in goalie_ids})
+    flagged_ids = [(n, *named[n]) for n in flagged if n in named]
     return {"ok": True, "skaters": skaters, "missing": missing, "projected_goalie": lines["goalies"][:1],
             "projected_goalie_id": g1[0] if g1 else None, "updated_at": lines["updated_at"],
             "hours_old": hours_old, "fresh": fresh, "source": lines["source"],
             "complete": not missing and len(skaters) == 18 and len(lines["defense"]) >= 6,
             "n_listed": (len(lines["forwards"]), len(lines["defense"])),
-            "flagged": flagged, "on_tonight_roster": on_roster,
+            "flagged": flagged, "flagged_ids": flagged_ids, "extras": extras, "on_tonight_roster": on_roster,
             "ids": ids}
 
 
