@@ -1,9 +1,7 @@
 # Through the day: re-pull lineups, goalies and prices, update tonight's picks.
 name: board
 on:
-  schedule:
-    - cron: "*/30 15-23 * * *"    # 10:00 AM - 6:30 PM Eastern
-    - cron: "*/20 0-3 * * *"      # 7:00 PM - 10:40 PM Eastern, every 20 min around puck drops
+  # started on time by Supabase (cron jobs nhl-prep / nhl-board-*), not GitHub's timer
   workflow_dispatch: {}
 concurrency: { group: nhl-board, cancel-in-progress: true }
 jobs:

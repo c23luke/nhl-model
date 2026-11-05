@@ -1,8 +1,7 @@
 # Every morning: grade last night's picks, bring in last night's games, rebuild ratings and models.
 name: daily prep
 on:
-  schedule:
-    - cron: "15 11 * * *"        # 6:15 AM Eastern (11:15 UTC)
+  # started on time by Supabase (cron jobs nhl-prep / nhl-board-*), not GitHub's timer
   workflow_dispatch: {}
 concurrency: { group: nhl-data, cancel-in-progress: false }
 jobs:
