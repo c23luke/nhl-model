@@ -28,6 +28,7 @@ def _norm(s):
 def to_text(page):
     """HTML report -> one line per table row, cells separated by spaces."""
     t = re.sub(r"(?is)<(script|style).*?</\1>", " ", page)
+    t = re.sub(r"\s+", " ", t)                    # the page breaks lines inside rows; rows end at </tr>
     t = re.sub(r"(?i)</tr\s*>", "\n", t)
     t = re.sub(r"(?i)<br\s*/?>", " ", t)
     t = re.sub(r"<[^>]+>", " ", t)
@@ -79,6 +80,15 @@ def to_shiftcharts(rows_by_team, roster_spots):
     return {"data": data, "total": len(data), "source": "nhl_html_toi_report"}, sorted(set(unmatched))
 
 
+STATS = {"used": 0, "failed": 0, "why": {}}      # printed by nhl_fetch after each season
+
+
+def _fail(why):
+    STATS["failed"] += 1
+    STATS["why"][why] = STATS["why"].get(why, 0) + 1
+    return None
+
+
 def fetch(season, game_id, pbp, timeout=30):
     """Shift data for one finished game from the printable reports, or None if they are not
     posted or look incomplete (fewer than 15 players with shifts on either team)."""
@@ -90,11 +100,14 @@ def fetch(season, game_id, pbp, timeout=30):
             req = urllib.request.Request(URL.format(season=season, side=side, num=num), headers=UA)
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 page = r.read().decode("utf-8", "ignore")
-        except Exception:
-            return None
+        except Exception as e:
+            return _fail(f"download: {type(e).__name__} {getattr(e, 'code', '')}".strip())
         rows[tid] = parse_text(to_text(page))
-    out, _ = to_shiftcharts(rows, pbp.get("rosterSpots"))
+        if not rows[tid]:
+            return _fail("report had no shift rows")
+    out, unmatched = to_shiftcharts(rows, pbp.get("rosterSpots"))
     for tid in teams.values():
         if len({d["playerId"] for d in out["data"] if d["teamId"] == tid}) < 15:
-            return None
+            return _fail(f"under 15 players matched ({len(unmatched)} unmatched)")
+    STATS["used"] += 1
     return out

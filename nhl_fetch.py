@@ -99,6 +99,11 @@ def fetch_season(season, workers=6, max_games=1500):
             n += len(batch)
             print(f"  {season}: {found} games cached  ({time.time() - t0:.0f}s)", end="\r", flush=True)
     print(f"  {season}: {found} games cached  ({time.time() - t0:.0f}s)        ")
+    S = htmlreports.STATS
+    if S["used"] or S["failed"]:
+        print(f"  {season}: shift data from printable reports for {S['used']} games, "
+              f"{S['failed']} not available {S['why'] or ''}")
+        S.update(used=0, failed=0, why={})
     return found
 
 
