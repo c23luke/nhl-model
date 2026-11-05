@@ -15,6 +15,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 import config
+import htmlreports
 import jsonio
 
 UA = {"User-Agent": "nhl-shot-model/0.1 (personal research)"}
@@ -67,6 +68,10 @@ def fetch_game(season, gid):
             have = False
         if not have:
             d = _get(ENDPOINTS[kind].format(gid=gid))
+            if kind == "shifts" and _no_shifts(d):
+                # the shift API comes back empty for some games (sometimes only for a while);
+                # the printable time-on-ice reports list the same shifts, so read those instead
+                d = htmlreports.fetch(season, gid, jsonio.load(p))
             if d is None or (kind == "shifts" and _no_shifts(d)):
                 continue          # nothing posted yet: save nothing, try again tomorrow
             jsonio.save(q, d)

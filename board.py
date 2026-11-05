@@ -95,10 +95,15 @@ def main():
         H, A = g["homeTeam"], g["awayTeam"]
         ha, aa = H["abbrev"], A["abbrev"]
         start = datetime.fromisoformat(g["startTimeUTC"].replace("Z", "+00:00"))
+        try:      # tonight's NHL roster (active players incl. scratches), used to match ids by jersey
+            spots = LU.get(f"https://api-web.nhle.com/v1/gamecenter/{g['id']}/play-by-play",
+                           as_json=True).get("rosterSpots", [])
+        except Exception:
+            spots = []
         lu = {}
-        for ab in (ha, aa):
+        for ab, tid in ((ha, H["id"]), (aa, A["id"])):
             try:
-                lu[ab] = LU.team_lineup(ab, start)
+                lu[ab] = LU.team_lineup(ab, start, [s for s in spots if s.get("teamId") == tid])
             except Exception as e:
                 lu[ab] = {"ok": False, "why": f"{ab} lineup fetch failed: {e}"}
         gl = {}
@@ -155,17 +160,32 @@ def main():
         ha, aa = r.home_abbrev, r.away_abbrev
         checks = {
             "goalies": gl[ha]["confirmed"] and gl[aa]["confirmed"],
-            "lineups": all(lu[x]["fresh"] and lu[x]["complete"] for x in (ha, aa)),
+            "lineups": all(lu[x]["complete"] and (lu[x]["fresh"] or LU.stale_ok(lu[x], gl[x]["confirmed"]))
+                           for x in (ha, aa)),
             "prices": len(side_rows) >= 2,
             "time": (start - now).total_seconds() / 60 >= MIN_MINUTES,
         }
-        waiting = []
+        waiting, notes = [], []
         for ab in (ha, aa):
             if not gl[ab]["confirmed"]:
                 waiting.append(f"{ab} goalie not confirmed (projected {gl[ab]['name'] or 'unknown'})")
             if not lu[ab]["fresh"]:
                 hrs = lu[ab]["hours_old"]
-                waiting.append(f"{ab} lines not updated today" + (f" (last {hrs:.0f}h before puck drop)" if hrs else ""))
+                age = f"last updated {hrs:.0f}h before puck drop" if hrs else "no update time"
+                if LU.stale_ok(lu[ab], gl[ab]["confirmed"]):
+                    notes.append(f"{ab} lines page {age}; trusted: goalie confirmed today, no injuries or "
+                                 f"game-time decisions listed, all 18 on tonight's NHL roster")
+                else:
+                    why = []
+                    if hrs and hrs > 96:
+                        why.append("older than 4 days")
+                    if lu[ab]["flagged"]:
+                        why.append("injury/game-time decision: " + ", ".join(lu[ab]["flagged"]))
+                    if not lu[ab]["on_tonight_roster"]:
+                        why.append("not all 18 on tonight's NHL roster")
+                    if not gl[ab]["confirmed"]:
+                        why.append("goalie not confirmed yet")
+                    waiting.append(f"{ab} lines not updated today ({age}" + (f"; {'; '.join(why)}" if why else "") + ")")
             if lu[ab]["missing"]:
                 waiting.append(f"{ab} players not matched to NHL records: {', '.join(lu[ab]['missing'])}")
             elif not lu[ab]["complete"]:
@@ -176,6 +196,7 @@ def main():
         if not checks["time"]:
             waiting.append("too close to puck drop")
         checks["waiting_on"] = "; ".join(waiting)
+        checks["lineup_note"] = "; ".join(notes)
         checks["goalies_named"] = {ab: gl[ab]["name"] for ab in (ha, aa)}
         stake = STAKE.get(strategy, 0.0)
         plan, left = PX.fill_plan(side_rows, stake or 1.0)

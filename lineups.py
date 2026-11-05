@@ -53,12 +53,15 @@ def parse_lines(html):
         return None
     c = d["props"]["pageProps"].get("combinations") or {}
     out = {"forwards": [], "defense": [], "goalies": [], "injured": [], "source": c.get("sourceName"),
-           "updated_at": None, "team": c.get("teamAbbreviation")}
+           "updated_at": None, "team": c.get("teamAbbreviation"), "meta": {}}
     if c.get("updatedAt"):
         out["updated_at"] = datetime.fromisoformat(c["updatedAt"].replace("Z", "+00:00"))
     order = {"f1": 0, "f2": 1, "f3": 2, "f4": 3, "d1": 0, "d2": 1, "d3": 2}
     for p in c.get("players", []):
         g, cat = p.get("groupIdentifier"), p.get("categoryIdentifier")
+        if cat == "ev" and p.get("name"):
+            out["meta"][p["name"]] = {"num": p.get("jerseyNumber"), "gtd": bool(p.get("gameTimeDecision")),
+                                      "injury": p.get("injuryStatus")}
         if cat == "ev" and g in ("f1", "f2", "f3", "f4"):
             out["forwards"].append((order[g], p["name"]))
         elif cat == "ev" and g in ("d1", "d2", "d3"):
@@ -137,27 +140,73 @@ def match(name, ids):
     return None
 
 
-def team_lineup(abbrev, puck_drop_utc):
-    """Everything the board needs for one team, with the evidence for each check."""
+POS = {"C": "F", "L": "F", "R": "F", "D": "D", "G": "G"}
+
+
+def spot_ids(spots):
+    """NHL pregame rosterSpots for one team -> ({jersey: (id, pos)}, {normalised name: (id, pos)}).
+    This is tonight's active roster (dressed players plus healthy scratches), so it includes
+    call-ups and new arrivals that the 'current roster' list can lag on."""
+    by_num, by_name = {}, {}
+    for r in spots or []:
+        v = (int(r["playerId"]), POS.get(r.get("positionCode"), "F"))
+        if r.get("sweaterNumber") is not None:
+            by_num[int(r["sweaterNumber"])] = v
+        by_name[norm(f"{r['firstName']['default']} {r['lastName']['default']}")] = v
+    return by_num, by_name
+
+
+def team_lineup(abbrev, puck_drop_utc, spots=None):
+    """Everything the board needs for one team, with the evidence for each check.
+    spots: tonight's NHL pregame rosterSpots for this team (optional)."""
     lines = fetch_lines(abbrev)
-    ids = roster_ids(abbrev)
     if not lines:
         return {"ok": False, "why": f"{abbrev} lines page unreadable"}
+    try:
+        ids = roster_ids(abbrev)
+    except Exception:
+        ids = {}
+    by_num, by_name = spot_ids(spots)
+    for k, v in by_name.items():
+        ids.setdefault(k, v)
+    meta = lines.get("meta", {})
+
+    def find(name):
+        # jersey number on tonight's roster first (no spelling problems), then the name
+        num = (meta.get(name) or {}).get("num")
+        if num is not None and int(num) in by_num:
+            return by_num[int(num)]
+        return match(name, ids)
+
     skaters, missing = [], []
     for name in lines["forwards"]:
-        m = match(name, ids)
+        m = find(name)
         (skaters.append((m[0], "F")) if m else missing.append(name))
     for name in lines["defense"]:
-        m = match(name, ids)
+        m = find(name)
         (skaters.append((m[0], "D")) if m else missing.append(name))
-    g1 = match(lines["goalies"][0], ids) if lines["goalies"] else None
+    g1 = find(lines["goalies"][0]) if lines["goalies"] else None
     hours_old = None
     if lines["updated_at"]:
         hours_old = (puck_drop_utc - lines["updated_at"]).total_seconds() / 3600
     fresh = hours_old is not None and hours_old <= 14          # updated since this morning's skate
+    flagged = [n for n in lines["forwards"] + lines["defense"]
+               if (meta.get(n) or {}).get("gtd") or (meta.get(n) or {}).get("injury")]
+    tonight = {v[0] for v in by_num.values()} | {v[0] for v in by_name.values()}
+    on_roster = bool(spots) and all(pid in tonight for pid, _ in skaters)
     return {"ok": True, "skaters": skaters, "missing": missing, "projected_goalie": lines["goalies"][:1],
             "projected_goalie_id": g1[0] if g1 else None, "updated_at": lines["updated_at"],
             "hours_old": hours_old, "fresh": fresh, "source": lines["source"],
             "complete": not missing and len(skaters) == 18 and len(lines["defense"]) >= 6,
             "n_listed": (len(lines["forwards"]), len(lines["defense"])),
+            "flagged": flagged, "on_tonight_roster": on_roster,
             "ids": ids}
+
+
+def stale_ok(lu, goalie_confirmed, max_hours=96):
+    """A lines page that hasn't been touched today is still trusted when nothing suggests a change:
+    updated within the last 4 days, the team's starting goalie confirmed today, no player in the
+    18 marked injured or a game-time decision, and all 18 on the NHL's roster for tonight's game."""
+    h = lu.get("hours_old")
+    return (not lu["fresh"] and h is not None and h <= max_hours and goalie_confirmed
+            and not lu["flagged"] and lu["on_tonight_roster"])
