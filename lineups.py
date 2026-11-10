@@ -190,6 +190,7 @@ def team_lineup(abbrev, puck_drop_utc, spots=None):
         if m:
             named[name] = (m[0], "D")
     g1 = find(lines["goalies"][0]) if lines["goalies"] else None
+    goalie_ids = [(n, find(n)[0]) for n in lines["goalies"] if find(n)]          # starter and backup
     hours_old = None
     if lines["updated_at"]:
         hours_old = (puck_drop_utc - lines["updated_at"]).total_seconds() / 3600
@@ -206,7 +207,7 @@ def team_lineup(abbrev, puck_drop_utc, spots=None):
                      if v[0] not in in18 and v[0] not in goalie_ids})
     flagged_ids = [(n, *named[n]) for n in flagged if n in named]
     return {"ok": True, "skaters": skaters, "missing": missing, "projected_goalie": lines["goalies"][:1],
-            "projected_goalie_id": g1[0] if g1 else None, "updated_at": lines["updated_at"],
+            "projected_goalie_id": g1[0] if g1 else None, "goalie_ids": goalie_ids, "updated_at": lines["updated_at"],
             "hours_old": hours_old, "fresh": fresh, "source": lines["source"],
             "complete": not missing and len(skaters) == 18 and len(lines["defense"]) >= 6,
             "n_listed": (len(lines["forwards"]), len(lines["defense"])),

@@ -2,7 +2,9 @@
 prices, re-rates each game, and updates the picks in Supabase.
 
 A pick is READY only when all four checks pass:
-  goalies  both starters marked Confirmed on DailyFaceoff
+  goalies  both starters marked Confirmed on DailyFaceoff -- or, for a game bet, the bet still
+           qualifies with the other goalie in net for every team whose starter isn't confirmed yet
+           (props still wait for confirmed goalies)
   lineups  both teams' lines updated within 14 hours of puck drop and fully matched to NHL ids
   prices   at least 2 of the books priced the side
   time     puck drop is at least 10 minutes away
@@ -13,6 +15,7 @@ Otherwise it is WAITING and says what it is waiting on.
 Usage: ODDS_API_KEY=... SUPABASE_SERVICE_KEY=... python board.py [--date YYYY-MM-DD] [--dry]
 """
 import argparse
+import itertools
 import json
 import os
 import pickle
@@ -152,7 +155,27 @@ def main():
                 if arow is not None:
                     sub_name = ids_to_name.get(sub, "an average depth player")
                     alts.append({"team": ab, "name": nm, "sub": sub_name, "row": arow, "props": apr})
-        info[g["id"]] = {"start": start, "lu": lu, "gl": gl, "ev": ev, "names": ids_to_name, "alts": alts}
+        # unconfirmed starting goalies: re-rate the game with the other goalie in net, for every mix of
+        # the unconfirmed teams; a game bet that qualifies in all of them doesn't need to wait
+        unconf = [(ab, tid) for ab, tid in ((ha, H["id"]), (aa, A["id"])) if not gl[ab]["confirmed"]]
+        other = {}
+        for ab, _ in unconf:
+            o = [(n, x) for n, x in lu[ab].get("goalie_ids", []) if x != gl[ab]["id"]]
+            other[ab] = o[0] if o and gl[ab]["id"] else None
+        galts = []
+        if unconf and all(other[ab] for ab, _ in unconf):
+            for n in range(1, len(unconf) + 1):
+                for combo in itertools.combinations(unconf, n):
+                    ups = {H["id"]: (lu[ha]["skaters"], gl[ha]["id"]), A["id"]: (lu[aa]["skaters"], gl[aa]["id"])}
+                    for ab, tid in combo:
+                        ups[tid] = (lu[ab]["skaters"], other[ab][1])
+                    arow, apr = R.game_features(gg, date_et, ups)
+                    if arow is not None:
+                        galts.append({"teams": tuple(ab for ab, _ in combo), "row": arow, "props": apr})
+        if len(galts) != 2 ** len(unconf) - 1:
+            galts = None                                   # couldn't test every case: wait for confirmation
+        info[g["id"]] = {"start": start, "lu": lu, "gl": gl, "ev": ev, "names": ids_to_name, "alts": alts,
+                         "galts": galts, "gother": other}
         rows.append(row)
         props.extend(pr)
 
@@ -193,6 +216,16 @@ def main():
                 emit(r, sid, r.home_abbrev if home else r.away_abbrev, "moneyline", ml["home" if home else "away"],
                      ev, {"tier": tier, "model_prob": round(float(r.p_home if home else 1 - r.p_home), 4),
                           "market_prob": round(float(r.mkt_p_home if home else 1 - r.mkt_p_home), 4)})
+        # tracking: the same 3+ stack with the rest flag left out (rest counts every back-to-back,
+        # not just a 20% tail, so it may be adding weaker bets)
+        n5 = net - np.sign(r.f_rest)
+        if abs(n5) >= 3:
+            home = n5 > 0
+            emit(r, "ml_stack3_norest", r.home_abbrev if home else r.away_abbrev, "moneyline", ml["home" if home else "away"],
+                 [e for e in S.evidence(r, prior, home, names) if e["flag"] != "Rest"],
+                 {"tier": f"{abs(int(n5))} flags, rest not counted",
+                  "model_prob": round(float(r.p_home if home else 1 - r.p_home), 4),
+                  "market_prob": round(float(r.mkt_p_home if home else 1 - r.mkt_p_home), 4)})
         # single flags (10% tails), tracking only
         for sid, f in (("ml_flag_lineup", "f_lineup"), ("ml_flag_hotgoalie", "f_hot_goalie")):
             hi, lo = prior[f].quantile(0.9), prior[f].quantile(0.1)
@@ -232,9 +265,12 @@ def main():
 
 
     # the same rules, run on each "game-time decision sits" version of a game: which picks still qualify
+    # and on each "other goalie in net" version: keys (game_id, "goalie", teams)
     holds = {}                                    # (game_id, team, name) -> {(strategy, pick), ...}
     for gid, i in info.items():
-        for alt in i.get("alts", []):
+        variants = [((gid, a["team"], a["name"]), a) for a in i.get("alts", [])]
+        variants += [((gid, "goalie", a["teams"]), a) for a in (i.get("galts") or [])]
+        for key, alt in variants:
             ga, pa = model.predict_live(models, pd.DataFrame([alt["row"]]), pd.DataFrame(alt["props"]), lines)
             da = pd.DataFrame([alt["row"]]).merge(ga, on="game_id")
             da["mkt_p_home"] = shop[gid][0]["fair_home"] if gid in shop else np.nan
@@ -242,7 +278,7 @@ def main():
             got = set()
             if gid in shop:
                 game_picks(da.iloc[0], lambda r, sid, pick, *a, **k: got.add((sid, pick)))
-            holds[(gid, alt["team"], alt["name"])] = got
+            holds[key] = got
 
     picks = []
 
@@ -251,16 +287,23 @@ def main():
         start = i["start"]
         lu, gl = i["lu"], i["gl"]
         ha, aa = r.home_abbrev, r.away_abbrev
+        unconf = [ab for ab in (ha, aa) if not gl[ab]["confirmed"]]
+        goalie_ok = not unconf
+        waiting, notes = [], []
+        if unconf and market != "shots on goal" and i.get("galts"):
+            goalie_ok = all((strategy, pick) in holds.get((r.game_id, "goalie", a["teams"]), set()) for a in i["galts"])
+            if goalie_ok:
+                notes.append("holds whichever goalie starts: " + "; ".join(
+                    f"{ab} {gl[ab]['name']} or {i['gother'][ab][0]}" for ab in unconf))
         checks = {
-            "goalies": gl[ha]["confirmed"] and gl[aa]["confirmed"],
+            "goalies": goalie_ok,
             "lineups": all(lu[x]["complete"] and (lu[x]["fresh"] or LU.stale_ok(lu[x], gl[x]["confirmed"]))
                            for x in (ha, aa)),
             "prices": len(side_rows) >= 2,
             "time": (start - now).total_seconds() / 60 >= MIN_MINUTES,
         }
-        waiting, notes = [], []
         for ab in (ha, aa):
-            if not gl[ab]["confirmed"]:
+            if not gl[ab]["confirmed"] and not goalie_ok:
                 waiting.append(f"{ab} goalie not confirmed (projected {gl[ab]['name'] or 'unknown'})")
             if not lu[ab]["fresh"]:
                 hrs = lu[ab]["hours_old"]
