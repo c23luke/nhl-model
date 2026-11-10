@@ -441,6 +441,9 @@ def write(picks, date_et, upcoming_ids):
             # the price we said to bet at stays as it was when the pick first turned ready;
             # the latest price is kept as the closing price
             p["close_decimal"] = p["best_decimal"]
+            # what to bet right now: the card shows this, the record keeps the price from when it turned ready
+            p["checks"]["now"] = {"book": p["best_book"], "american": p["best_american"],
+                                  "decimal": p["best_decimal"], "plan": p["fill_plan"], "at": p["priced_at"]}
             for k in ("best_decimal", "best_book", "best_american", "fill_plan"):
                 p[k] = o[k]
             if o["status"] == "placed":
