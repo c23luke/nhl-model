@@ -32,7 +32,12 @@ def final(game_id):
         n = norm_name(f"{r['firstName']['default']} {r['lastName']['default']}")
         if r["playerId"] in sog:
             sog[n] = sog[r["playerId"]]
-    return {"home": b["homeTeam"]["score"], "away": b["awayTeam"]["score"],
+    starters = {}
+    for side, ab in (("homeTeam", b["homeTeam"]["abbrev"]), ("awayTeam", b["awayTeam"]["abbrev"])):
+        for g in b.get("playerByGameStats", {}).get(side, {}).get("goalies", []):
+            if g.get("starter"):
+                starters[ab] = norm_name(g.get("name", {}).get("default", ""))
+    return {"home": b["homeTeam"]["score"], "away": b["awayTeam"]["score"], "starters": starters,
             "home_ab": b["homeTeam"]["abbrev"], "away_ab": b["awayTeam"]["abbrev"], "sog": sog}
 
 
@@ -75,6 +80,12 @@ def main():
                 risk_u = stake / ((p["best_decimal"] or 2.0) - 1)
             profit = stake if res == "W" else (0.0 if res == "P" else -risk_u)
             upd.update(status="graded", result=res, profit_units=round(profit, 4))
+            eg = (p.get("checks") or {}).get("early_goalies")
+            if eg and f.get("starters"):       # early test: did the projected goalies both start?
+                def same(a, b):                # boxscore gives "S. Cossa"; projection gives "Sebastian Cossa"
+                    a, b = norm_name(a or ""), b or ""
+                    return bool(a and b) and a.split()[-1] == b.split()[-1] and a[:1] == b[:1]
+                upd["checks"] = dict(p["checks"], goalies_right=all(same(eg.get(ab), f["starters"].get(ab)) for ab in eg))
             if p.get("close_decimal") and p.get("best_decimal"):
                 upd["clv"] = round(float(p["best_decimal"]) / float(p["close_decimal"]) - 1, 4)
             supa.patch("nhl_picks", {"id": f"eq.{p['id']}"}, upd)

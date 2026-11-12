@@ -120,7 +120,8 @@ def main():
                 gid = m[0] if m else None
             gl[ab] = {"id": gid or (lu[ab].get("projected_goalie_id") if lu[ab].get("ok") else None),
                       "name": (x or {}).get("name") or ((lu[ab].get("projected_goalie") or [None])[0] if lu[ab].get("ok") else None),
-                      "confirmed": bool(x and x.get("confirmed") and gid)}
+                      "confirmed": bool(x and x.get("confirmed") and gid),
+                      "status": str((x or {}).get("status") or "")}
         if not (lu[ha].get("ok") and lu[aa].get("ok")):
             info[g["id"]] = {"skip": "; ".join(lu[x]["why"] for x in (ha, aa) if not lu[x].get("ok"))}
             continue
@@ -396,6 +397,15 @@ def main():
              "median_decimal": float(np.median([x["decimal"] for x in side_rows])) if side_rows else None}
         p.update(extra or {})
         picks.append(p)
+        # TRACKING test of betting early: a moneyline that passes everything except goalie confirmation, where
+        # each unconfirmed starter is DailyFaceoff "Likely". Recorded at the price when it first shows up (no money),
+        # graded normally, and checked against who actually started, to learn whether betting on "Likely" pays.
+        if (market == "moneyline" and strategy in STAKE and all(checks[k] for k in ("lineups", "prices", "time", "gtd"))
+                and all(gl[ab]["confirmed"] or gl[ab]["status"].lower() == "likely" for ab in (ha, aa))):
+            e = dict(p, strategy_id=f"{strategy}_early", stake_units=0.0, status="ready",
+                     checks=dict(checks, early_goalies={ab: gl[ab]["name"] for ab in (ha, aa)},
+                                 early_status={ab: ("Confirmed" if gl[ab]["confirmed"] else gl[ab]["status"]) for ab in (ha, aa)}))
+            picks.append(e)
 
     for _, r in d.iterrows():
         if r.game_id in shop:
@@ -512,6 +522,8 @@ def write(picks, date_et, upcoming_ids):
         ck = o.get("checks") or {}
         if (k not in new_keys and o["game_id"] in upcoming_ids and o["status"] in ("ready", "placed")
                 and not ck.get("late_change")):
+            if str(o["strategy_id"]).endswith("_early"):       # early test: its projected goalie didn't start
+                ck["late_change"] = "projected goalie changed or the bet stopped qualifying"
             ck["late_change"] = "no longer qualifies on the latest goalies, lineups or prices"
             supa.patch("nhl_picks", {"id": f"eq.{o['id']}"}, {"checks": ck, "updated_at": datetime.now(timezone.utc).isoformat()})
             alerts.append(f"{o['pick']} ({k[0]}): {ck['late_change']}")
