@@ -124,6 +124,20 @@ def main():
         if not (lu[ha].get("ok") and lu[aa].get("ok")):
             info[g["id"]] = {"skip": "; ".join(lu[x]["why"] for x in (ha, aa) if not lu[x].get("ok"))}
             continue
+        # players on the lines page who aren't on the NHL's roster for tonight: the team's best extra skater at
+        # the same position goes in; further down, the bet is also tested with each of the next two extras
+        repl = []
+        for ab in (ha, aa):
+            for nm, pid, pos in lu[ab].get("off_roster", []):
+                used = {p for p, _ in lu[ab]["skaters"]}
+                cands = sorted(((R.skater(p, q)["e5"], p) for p, q in lu[ab].get("extras", []) if q == pos and p not in used), reverse=True)
+                if not cands:
+                    continue                               # nobody to put in: stays off-roster, lineup waits
+                lu[ab]["skaters"] = [(cands[0][1] if p == pid else p, q) for p, q in lu[ab]["skaters"]]
+                repl.append((ab, nm, cands[0][1], [c[1] for c in cands[1:3]]))
+            tonight = set(lu[ab].get("tonight_ids", []))
+            if tonight:
+                lu[ab]["on_tonight_roster"] = all(p in tonight for p, _ in lu[ab]["skaters"])
         hname = f"{H['placeName']['default']} {H['commonName']['default']}"
         aname = f"{A['placeName']['default']} {A['commonName']['default']}"
         gg = SimpleNamespace(game_id=g["id"], season=config.LIVE_SEASON, start_utc=g["startTimeUTC"][:19],
@@ -146,6 +160,8 @@ def main():
         for ab, tid in ((ha, H["id"]), (aa, A["id"])):
             for k, (nm, pid, pos) in enumerate(lu[ab].get("flagged_ids", [])):
                 used = {p for p, _ in lu[ab]["skaters"]}
+                if pid not in used:
+                    continue                               # already swapped out (not on tonight's roster)
                 subs = [(R.skater(p, q)["e5"], p) for p, q in lu[ab].get("extras", []) if q == pos and p not in used]
                 sub = max(subs)[1] if subs else -(1000 + k)
                 sk = [(sub if p == pid else p, q) for p, q in lu[ab]["skaters"]]
@@ -155,6 +171,17 @@ def main():
                 if arow is not None:
                     sub_name = ids_to_name.get(sub, "an average depth player")
                     alts.append({"team": ab, "name": nm, "sub": sub_name, "row": arow, "props": apr})
+        # a swapped-in extra: also rate the game with each of the next extras in his place instead
+        for ab, nm, first, others in repl:
+            tid = H["id"] if ab == ha else A["id"]
+            for c in others:
+                sk = [(c if p == first else p, q) for p, q in lu[ab]["skaters"]]
+                ups = {H["id"]: (lu[ha]["skaters"], gl[ha]["id"]), A["id"]: (lu[aa]["skaters"], gl[aa]["id"])}
+                ups[tid] = (sk, gl[ab]["id"])
+                arow, apr = R.game_features(gg, date_et, ups)
+                if arow is not None:
+                    alts.append({"team": ab, "name": nm, "key": f"{nm}|{c}", "kind": "roster", "sub": ids_to_name.get(c, str(c)),
+                                 "first": ids_to_name.get(first, str(first)), "row": arow, "props": apr})
         # unconfirmed starting goalies: re-rate the game with the other goalie in net, for every mix of
         # the unconfirmed teams; a game bet that qualifies in all of them doesn't need to wait
         unconf = [(ab, tid) for ab, tid in ((ha, H["id"]), (aa, A["id"])) if not gl[ab]["confirmed"]]
@@ -175,7 +202,8 @@ def main():
         if len(galts) != 2 ** len(unconf) - 1:
             galts = None                                   # couldn't test every case: wait for confirmation
         info[g["id"]] = {"start": start, "lu": lu, "gl": gl, "ev": ev, "names": ids_to_name, "alts": alts,
-                         "galts": galts, "gother": other}
+                         "galts": galts, "gother": other,
+                         "repl": [(ab, nm, ids_to_name.get(first, str(first))) for ab, nm, first, _ in repl]}
         rows.append(row)
         props.extend(pr)
 
@@ -268,7 +296,7 @@ def main():
     # and on each "other goalie in net" version: keys (game_id, "goalie", teams)
     holds = {}                                    # (game_id, team, name) -> {(strategy, pick), ...}
     for gid, i in info.items():
-        variants = [((gid, a["team"], a["name"]), a) for a in i.get("alts", [])]
+        variants = [((gid, a["team"], a.get("key", a["name"])), a) for a in i.get("alts", [])]
         variants += [((gid, "goalie", a["teams"]), a) for a in (i.get("galts") or [])]
         for key, alt in variants:
             ga, pa = model.predict_live(models, pd.DataFrame([alt["row"]]), pd.DataFrame(alt["props"]), lines)
@@ -297,8 +325,7 @@ def main():
                     f"{ab} {gl[ab]['name']} or {i['gother'][ab][0]}" for ab in unconf))
         checks = {
             "goalies": goalie_ok,
-            "lineups": all(lu[x]["complete"] and (lu[x]["fresh"] or LU.stale_ok(lu[x], gl[x]["confirmed"]))
-                           for x in (ha, aa)),
+            "lineups": all(LU.lineup_ok(lu[x]) for x in (ha, aa)),
             "prices": len(side_rows) >= 2,
             "time": (start - now).total_seconds() / 60 >= MIN_MINUTES,
         }
@@ -308,19 +335,16 @@ def main():
             if not lu[ab]["fresh"]:
                 hrs = lu[ab]["hours_old"]
                 age = f"last updated {hrs:.0f}h before puck drop" if hrs else "no update time"
-                if LU.stale_ok(lu[ab], gl[ab]["confirmed"]):
-                    notes.append(f"{ab} lines page {age}; trusted: goalie confirmed today, no injuries or "
-                                 f"game-time decisions listed, all 18 on tonight's NHL roster")
+                if LU.lineup_ok(lu[ab]):
+                    notes.append(f"{ab} lines page {age}; trusted: all 18 on tonight's NHL roster "
+                                 f"(goalie and game-time decisions tested separately)")
                 else:
                     why = []
                     if hrs and hrs > 96:
                         why.append("older than 4 days")
-                    if lu[ab]["flagged"]:
-                        why.append("injury/game-time decision: " + ", ".join(lu[ab]["flagged"]))
                     if not lu[ab]["on_tonight_roster"]:
-                        why.append("not all 18 on tonight's NHL roster")
-                    if not gl[ab]["confirmed"]:
-                        why.append("goalie not confirmed yet")
+                        why.append("NHL roster for tonight not posted yet" if not lu[ab].get("tonight_ids")
+                                   else "not all 18 on tonight's NHL roster")
                     waiting.append(f"{ab} lines not updated today ({age}" + (f"; {'; '.join(why)}" if why else "") + ")")
             if lu[ab]["missing"]:
                 waiting.append(f"{ab} players not matched to NHL records: {', '.join(lu[ab]['missing'])}")
@@ -329,7 +353,18 @@ def main():
                 waiting.append(f"{ab} lineup incomplete ({f_} forwards, {d_} defense listed)")
         # game-time decisions in either lineup
         checks["gtd"] = True
+        for ab, nm, first in i.get("repl", []):
+            notes.append(f"{nm} ({ab}) not on tonight's NHL roster; {first} in for him")
         for alt in i.get("alts", []):
+            if alt.get("kind") == "roster":            # who replaces an off-roster player
+                if market == "shots on goal":
+                    continue
+                if (strategy, pick) in holds.get((r.game_id, alt["team"], alt["key"]), set()):
+                    notes.append(f"holds with {alt['sub']} in for {alt['name']} instead of {alt['first']}")
+                else:
+                    checks["gtd"] = False
+                    waiting.append(f"waiting on who replaces {alt['name']} ({alt['team']}): the bet depends on it")
+                continue
             who = f"{alt['name']} ({alt['team']}, game-time decision)"
             if market == "shots on goal":
                 if (extra or {}).get("player") and norm_name(extra["player"]) == norm_name(alt["name"]):

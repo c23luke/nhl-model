@@ -206,13 +206,25 @@ def team_lineup(abbrev, puck_drop_utc, spots=None):
     extras = sorted({v for v in list(by_num.values()) + list(by_name.values())
                      if v[0] not in in18 and v[0] not in goalie_ids})
     flagged_ids = [(n, *named[n]) for n in flagged if n in named]
+    # in DailyFaceoff's 18 but not on the NHL's roster for tonight (sent down, hurt, traded); empty until the
+    # NHL posts tonight's roster
+    off_roster = [(n, *named[n]) for n in named if named[n][0] not in tonight] if spots else []
     return {"ok": True, "skaters": skaters, "missing": missing, "projected_goalie": lines["goalies"][:1],
             "projected_goalie_id": g1[0] if g1 else None, "goalie_ids": net_goalies, "updated_at": lines["updated_at"],
             "hours_old": hours_old, "fresh": fresh, "source": lines["source"],
             "complete": not missing and len(skaters) == 18 and len(lines["defense"]) >= 6,
             "n_listed": (len(lines["forwards"]), len(lines["defense"])),
             "flagged": flagged, "flagged_ids": flagged_ids, "extras": extras, "on_tonight_roster": on_roster,
+            "off_roster": off_roster, "tonight_ids": sorted(tonight),
             "ids": ids}
+
+
+def lineup_ok(lu, max_hours=96):
+    """The 18 to rate: today's lines page, or an older one (up to 4 days) once every player in it is on the NHL's
+    roster for tonight (anyone who wasn't has been swapped for tonight's extras by the board). Game-time decisions
+    and an unconfirmed goalie are not checked here: the board tests the bet with and without each of them."""
+    h = lu.get("hours_old")
+    return lu["complete"] and (lu["fresh"] or (h is not None and h <= max_hours and lu["on_tonight_roster"]))
 
 
 def stale_ok(lu, goalie_confirmed, max_hours=96):
