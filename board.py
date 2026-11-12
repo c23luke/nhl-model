@@ -465,11 +465,11 @@ def print_board(picks, info):
 def write(picks, date_et, upcoming_ids):
     import supa
     existing = supa.select("nhl_picks", {"select": "id,strategy_id,game_id,pick,status,best_decimal,best_book,"
-                                                   "best_american,fill_plan", "source": "eq.live",
+                                                   "best_american,fill_plan,checks,start_utc", "source": "eq.live",
                                          "game_date": f"eq.{date_et}"})
     key = lambda p: (p["strategy_id"], int(p["game_id"]), p["pick"])
     old = {key(p): p for p in existing}
-    out = []
+    out, alerts = [], []
     for p in picks:
         o = old.get(key(p))
         if o and o["status"] in ("ready", "placed") and o.get("best_decimal"):
@@ -485,6 +485,15 @@ def write(picks, date_et, upcoming_ids):
                 p["status"] = "placed"
             else:
                 p["status"] = "ready"
+            # after it turned ready, a goalie, lineup or game-time-decision check now fails (late scratch,
+            # goalie switch): it may already be bet, so it stays, but the card says so
+            before = (o.get("checks") or {}).get("late_change")
+            if not all(p["checks"].get(k) for k in ("goalies", "lineups", "gtd")):
+                p["checks"]["late_change"] = p["checks"].get("waiting_on") or "a goalie or lineup check now fails"
+                if not before:
+                    alerts.append(f"{p['away']} at {p['home']}, {p['pick']}: {p['checks']['late_change']}")
+            elif before:
+                p["checks"]["late_change"] = before
         p["updated_at"] = datetime.now(timezone.utc).isoformat()
         out.append(p)
     cols = set().union(*[p.keys() for p in out]) if out else set()
@@ -498,7 +507,16 @@ def write(picks, date_et, upcoming_ids):
             if k not in new_keys and o["game_id"] in upcoming_ids and o["status"] == "waiting"]
     for g in gone:
         supa.patch("nhl_picks", {"id": f"eq.{g['id']}"}, {"status": "void", "updated_at": datetime.now(timezone.utc).isoformat()})
-    print(f"wrote {len(out)} picks, voided {len(gone)}")
+    # a ready or placed pick that no longer comes up at all before puck drop (goalie, lineup or price changed)
+    for k, o in old.items():
+        ck = o.get("checks") or {}
+        if (k not in new_keys and o["game_id"] in upcoming_ids and o["status"] in ("ready", "placed")
+                and not ck.get("late_change")):
+            ck["late_change"] = "no longer qualifies on the latest goalies, lineups or prices"
+            supa.patch("nhl_picks", {"id": f"eq.{o['id']}"}, {"checks": ck, "updated_at": datetime.now(timezone.utc).isoformat()})
+            alerts.append(f"{o['pick']} ({k[0]}): {ck['late_change']}")
+    print(f"wrote {len(out)} picks, voided {len(gone)}, late changes {len(alerts)}")
+
 
 
 if __name__ == "__main__":
