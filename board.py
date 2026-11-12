@@ -36,7 +36,8 @@ from parse import TABLES, norm_name
 from ratings import Rater
 
 STAKE = {"ml_stack3": 1.0, "ml_blend5": 1.0, "sog_blend5": 0.5}        # BETS; everything else is tracking
-MIN_MINUTES = 10
+MIN_MINUTES = 3        # the auto-bettor places within a minute; by-hand bets need about 10 (see hand_ok)
+HAND_MINUTES = 10
 
 
 def odds_call(path, params):
@@ -329,6 +330,7 @@ def main():
             "lineups": all(LU.lineup_ok(lu[x]) for x in (ha, aa)),
             "prices": len(side_rows) >= 2,
             "time": (start - now).total_seconds() / 60 >= MIN_MINUTES,
+            "hand_ok": (start - now).total_seconds() / 60 >= HAND_MINUTES,
         }
         for ab in (ha, aa):
             if not gl[ab]["confirmed"] and not goalie_ok:
