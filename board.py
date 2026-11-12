@@ -399,6 +399,12 @@ def main():
              "median_decimal": float(np.median([x["decimal"] for x in side_rows])) if side_rows else None}
         p.update(extra or {})
         picks.append(p)
+        # TRACKING test of betting at the first look: every BETS pick, the first time the model likes it, whatever
+        # it is still waiting on. The price is locked at that first sighting; grading records whether the real bet
+        # ever turned ready, so we learn how often first ideas hold up and whether their price beats waiting.
+        if strategy in STAKE:
+            picks.append(dict(p, strategy_id=f"{strategy}_first", stake_units=0.0, status="ready",
+                              checks=dict(checks, first_waiting=checks.get("waiting_on") or "nothing")))
         # TRACKING test of betting early: a moneyline that passes everything except goalie confirmation, where
         # each unconfirmed starter is DailyFaceoff "Likely". Recorded at the price when it first shows up (no money),
         # graded normally, and checked against who actually started, to learn whether betting on "Likely" pays.
@@ -524,8 +530,8 @@ def write(picks, date_et, upcoming_ids):
         ck = o.get("checks") or {}
         if (k not in new_keys and o["game_id"] in upcoming_ids and o["status"] in ("ready", "placed")
                 and not ck.get("late_change")):
-            if str(o["strategy_id"]).endswith("_early"):       # early test: its projected goalie didn't start
-                ck["late_change"] = "projected goalie changed or the bet stopped qualifying"
+            if str(o["strategy_id"]).endswith(("_early", "_first")):   # tests: the idea stopped qualifying
+                ck["late_change"] = "the idea stopped qualifying before puck drop"
             ck["late_change"] = "no longer qualifies on the latest goalies, lineups or prices"
             supa.patch("nhl_picks", {"id": f"eq.{o['id']}"}, {"checks": ck, "updated_at": datetime.now(timezone.utc).isoformat()})
             alerts.append(f"{o['pick']} ({k[0]}): {ck['late_change']}")

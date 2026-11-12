@@ -80,12 +80,17 @@ def main():
                 risk_u = stake / ((p["best_decimal"] or 2.0) - 1)
             profit = stake if res == "W" else (0.0 if res == "P" else -risk_u)
             upd.update(status="graded", result=res, profit_units=round(profit, 4))
+            if str(p["strategy_id"]).endswith(("_early", "_first")):   # did the real bet ever turn ready?
+                base_id = p["strategy_id"].rsplit("_", 1)[0]
+                real = [q for q in ps if q["strategy_id"] == base_id and q["pick"] == p["pick"]]
+                upd["checks"] = dict(upd.get("checks") or p.get("checks") or {},
+                                     became_bet=bool(real) and real[0]["status"] in ("ready", "placed"))
             eg = (p.get("checks") or {}).get("early_goalies")
             if eg and f.get("starters"):       # early test: did the projected goalies both start?
                 def same(a, b):                # boxscore gives "S. Cossa"; projection gives "Sebastian Cossa"
                     a, b = norm_name(a or ""), b or ""
                     return bool(a and b) and a.split()[-1] == b.split()[-1] and a[:1] == b[:1]
-                upd["checks"] = dict(p["checks"], goalies_right=all(same(eg.get(ab), f["starters"].get(ab)) for ab in eg))
+                upd["checks"] = dict(upd.get("checks") or p["checks"], goalies_right=all(same(eg.get(ab), f["starters"].get(ab)) for ab in eg))
             if p.get("close_decimal") and p.get("best_decimal"):
                 upd["clv"] = round(float(p["best_decimal"]) / float(p["close_decimal"]) - 1, 4)
             supa.patch("nhl_picks", {"id": f"eq.{p['id']}"}, upd)
